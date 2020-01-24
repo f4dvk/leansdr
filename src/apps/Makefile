@@ -20,7 +20,7 @@ LDFLAGS		=
 DEPS	= ../leansdr/*.h
 
 # Uncomment to compile features with potential intellectual property issues.
-#CXXFLAGS	+= -DLEANSDR_EXTENSIONS
+CXXFLAGS	+= -DLEANSDR_EXTENSIONS
 
 # Base applications have no external dependencies.
 APPS	=
