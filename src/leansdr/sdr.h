@@ -1,4 +1,4 @@
-// This file is part of LeanSDR Copyright (C) 2016-2018 <pabr@pabr.org>.
+// This file is part of LeanSDR Copyright (C) 2016-2019 <pabr@pabr.org>.
 // See the toplevel README for more information.
 //
 // This program is free software: you can redistribute it and/or modify
@@ -239,17 +239,17 @@ namespace leansdr {
     float out_rms;    // Desired RMS output power
     float bw;         // Bandwidth
     float estimated;  // Input power
+    static const int chunk_size = 128;
     simple_agc(scheduler *sch,
 	       pipebuf< complex<T> > &_in,
 	       pipebuf< complex<T> > &_out)
       : runnable(sch, "AGC"),
 	out_rms(1), bw(0.001), estimated(0),
-	in(_in), out(_out) {
+	in(_in), out(_out, chunk_size) {
     }
   private:
     pipereader< complex<T> > in;
     pipewriter< complex<T> > out;
-    static const int chunk_size = 128;
     void run() {
       while ( in.readable() >= chunk_size &&
 	      out.writable() >= chunk_size ) {
@@ -284,7 +284,7 @@ namespace leansdr {
   // R must be a power of 2.
   // Up to 256 symbols.
   
-  struct softsymbol {
+  struct softsymbol {  // TBD obsolete
     int16_t cost;  // For Viterbi with TBM=int16_t
     uint8_t symbol;
   };
@@ -296,23 +296,120 @@ namespace leansdr {
   //const float cstln_amp = 75;  // Best for BPSK at 45°
   const float cstln_amp = 75;  // Trade-off
 
-  template<int R>
-  struct cstln_lut {
-    complex<signed char> *symbols;
-    int nsymbols;
-    int nrotations;
+  // A struct that temporarily holds all the info we precompute for the LUT.
+  struct full_ss {
+    uint8_t nearest;       // Index of nearest in constellation
+    uint16_t dists2[256];  // Squared distances
+    float p[8];            // 0..1 probability of bits being 1
+  };
 
+  // Options for soft-symbols.
+  // These functions are overloaded to keep cstln_lut<SOFTSYMB> generic:
+  //   to_softsymb(const full_ss *fss, SOFTSYMB *ss)
+  //   softsymb_harden(SOFTSYMB *ss) {
+  //   softsymb_to_dump(const SOFTSYMB &ss, int bit)     To grey 0..255
+  // For LUT initialization only.  Performance is not critical.
+
+  // Hard decision soft-symbols.
+  // Value is the symbol index, 0..255.
+  typedef uint8_t hard_ss;
+  void to_softsymb(const full_ss *fss, hard_ss *ss) {
+    *ss = fss->nearest;
+  }
+  void softsymb_harden(hard_ss *ss) {
+    // NOP
+  }
+  uint8_t softsymb_to_dump(const hard_ss &ss, int bit) {
+    return ((ss>>bit)&1) ? 255 : 0;
+  }
+
+  // Euclidian QPSK soft-symbols.
+  // Additive metric suitable for Viterbi.
+  // Backward-compatible with simplified Viterbi (TBD remove)
+  struct eucl_ss {
+    static const int MAX_SYMBOLS = 4;
+    uint16_t dists2[MAX_SYMBOLS];
+    uint16_t discr2;  // 2nd_nearest - nearest
+    uint8_t nearest;
+  };
+  void to_softsymb(const full_ss *fss, eucl_ss *ss) {
+    for ( int s=0; s<ss->MAX_SYMBOLS; ++s )
+      ss->dists2[s] = fss->dists2[s];
+    uint16_t best=65535, best2=65535;
+    for ( int s=0; s<ss->MAX_SYMBOLS; ++s ) {
+      if      ( fss->dists2[s] < best )  { best2=best; best=fss->dists2[s]; }
+      else if ( fss->dists2[s] < best2 ) { best2=fss->dists2[s]; }
+    }
+    ss->discr2 = best2 - best;
+    ss->nearest = fss->nearest;
+  }
+  void softsymb_harden(eucl_ss *ss) {
+    for ( int s=0; s<ss->MAX_SYMBOLS; ++s )
+      ss->dists2[s] = (s==ss->nearest) ? 0 : 1;
+  }
+  uint8_t softsymb_to_dump(const eucl_ss &ss, int bit) {
+    return ss.dists2[ss.nearest] >> 8;
+  }
+
+  // Log-Likelihood Ratios soft-symbols
+  typedef int8_t llr_t;  // log(p(0)/p(1)), clip -127=1 +127=0
+  inline bool llr_harden(llr_t v) { return v & 128; }
+  struct llr_ss {
+    llr_t bits[8];  // Up to 8 bit considered independent
+  };
+  void to_softsymb(const full_ss *fss, llr_ss *ss) {
+    for ( int b=0; b<8; ++b ) {
+      float v = (1.0f-fss->p[b]) / (fss->p[b]+1e-6);
+      int r = logf(v) * 5;  // TBD Optimal scaling vs saturation ?
+      if ( r < -127 ) r = -127;
+      if ( r >  127 ) r =  127;
+      ss->bits[b] = r;
+    }
+  }
+  void softsymb_harden(llr_ss *ss) {
+    for ( int b=0; b<8; ++b )
+      ss->bits[b] = (ss->bits[b]<0) ? -127 : 127;
+  }
+  uint8_t softsymb_to_dump(const llr_ss &ss, int bit) {
+    return 128 - ss.bits[bit];
+  }
+
+  struct cstln_base {
     enum predef {
       BPSK,                    // DVB-S2 (and DVB-S variant)
       QPSK,                    // DVB-S
       PSK8, APSK16, APSK32,    // DVB-S2
       APSK64E,                 // DVB-S2X
-      QAM16, QAM64, QAM256     // For experimentation only
+      QAM16, QAM64, QAM256,    // For experimentation only
+      COUNT
     };
+    static const char *names[];
+    float amp_max;  // Max amplitude. 1 for PSK, 0 if not applicable.
+    complex<int8_t> *symbols;
+    int nsymbols;
+    int nrotations;
+  };  // cstln_base
 
-    cstln_lut(predef type, float gamma1=1, float gamma2=1, float gamma3=1) {
+  const char *cstln_base::names[] = {
+    [BPSK]    = "BPSK",
+    [QPSK]    = "QPSK",
+    [PSK8]    = "8PSK",
+    [APSK16]  = "16APSK",
+    [APSK32]  = "32APSK",
+    [APSK64E] = "64APSKe",
+    [QAM16]   = "16QAM",
+    [QAM64]   = "64QAM",
+    [QAM256]  = "256QAM"
+  };
+
+  template<typename SOFTSYMB, int R>
+  struct cstln_lut : cstln_base {
+    cstln_lut(cstln_base::predef type,
+	      float mer=10,
+	      float gamma1=0, float gamma2=0, float gamma3=0) {
       switch ( type ) {
       case BPSK:
+	amp_max = 1;
 	nrotations = 2;
 	nsymbols = 2;
 	symbols = new complex<signed char>[nsymbols];
@@ -323,9 +420,10 @@ namespace leansdr {
 	symbols[0] = polar(1, 8, 1);
 	symbols[1] = polar(1, 8, 5);
 #endif
-	make_lut_from_symbols();
+	make_lut_from_symbols(mer);
 	break;
       case QPSK:
+	amp_max = 1;
 	// EN 300 421, section 4.5 Baseband shaping and modulation
 	// EN 302 307, section 5.4.1
 	nrotations = 4;
@@ -335,9 +433,10 @@ namespace leansdr {
 	symbols[1] = polar(1, 4, 3.5);
 	symbols[2] = polar(1, 4, 1.5);
 	symbols[3] = polar(1, 4, 2.5);
-	make_lut_from_symbols();
+	make_lut_from_symbols(mer);
 	break;
       case PSK8:
+	amp_max = 1;
 	// EN 302 307, section 5.4.2
 	nrotations = 8;
 	nsymbols = 8;
@@ -350,12 +449,15 @@ namespace leansdr {
 	symbols[5] = polar(1, 8, 7);
 	symbols[6] = polar(1, 8, 3);
 	symbols[7] = polar(1, 8, 6);
-	make_lut_from_symbols();
+	make_lut_from_symbols(mer);
 	break;
       case APSK16: {
+	// Default gamma for non-DVB-S2 applications.
+	if ( ! gamma1 ) gamma1 = 2.57;
 	// EN 302 307, section 5.4.3
 	float r1 = sqrtf(4 / (1+3*gamma1*gamma1));
 	float r2 = gamma1 * r1;
+	amp_max = r2;
 	nrotations = 4;
 	nsymbols = 16;
 	symbols = new complex<signed char>[nsymbols];
@@ -375,14 +477,18 @@ namespace leansdr {
 	symbols[13] = polar(r1, 4,   3.5);
 	symbols[14] = polar(r1, 4,   1.5);
 	symbols[15] = polar(r1, 4,   2.5);
-	make_lut_from_symbols();
+	make_lut_from_symbols(mer);
 	break;
       }
       case APSK32: {
+	// Default gammas for non-DVB-S2 applications.
+	if ( ! gamma1 ) gamma1 = 2.53;
+	if ( ! gamma2 ) gamma2 = 4.30;
 	// EN 302 307, section 5.4.3
 	float r1 = sqrtf(8 / (1+3*gamma1*gamma1+4*gamma2*gamma2));
 	float r2 = gamma1 * r1;
 	float r3 = gamma2 * r1;
+	amp_max = r3;
 	nrotations = 4;
 	nsymbols = 32;
 	symbols = new complex<signed char>[nsymbols];
@@ -418,16 +524,21 @@ namespace leansdr {
 	symbols[29] = polar(r3, 16,  5  );
 	symbols[30] = polar(r3, 16,  8  );
 	symbols[31] = polar(r3, 16, 10  );
-	make_lut_from_symbols();
+	make_lut_from_symbols(mer);
 	break;
       }
       case APSK64E: {
+	// Default gammas for non-DVB-S2 applications.
+	if ( ! gamma1 ) gamma1 = 2.4;
+	if ( ! gamma2 ) gamma2 = 4.3;
+	if ( ! gamma3 ) gamma3 = 7.0;
 	// EN 302 307-2, section 5.4.5, Table 13e
 	float r1 =
 	  sqrtf(64 / (4+12*gamma1*gamma1+20*gamma2*gamma2+28*gamma3*gamma3));
 	float r2 = gamma1 * r1;
 	float r3 = gamma2 * r1;
 	float r4 = gamma3 * r1;
+	amp_max = r4;
 	nrotations = 4;
 	nsymbols = 64;
 	symbols = new complex<signed char>[nsymbols];
@@ -447,16 +558,19 @@ namespace leansdr {
 	polar2(52, r3,  7.0/20, 33.0/20, 13.0/20, 27.0/20);
 	polar2(56, r3,  3.0/20, 37.0/20, 17.0/20, 23.0/20);
 	polar2(60, r2,  1.0/ 4,  7.0/ 4,  3.0/ 4,  5.0/ 4);
-	make_lut_from_symbols();
+	make_lut_from_symbols(mer);
 	break;
       }
       case QAM16:
+	amp_max = 0;
 	make_qam(16);
 	break;
       case QAM64:
+	amp_max = 1;
 	make_qam(64);
 	break;
       case QAM256:
+	amp_max = 1;
 	make_qam(256);
 	break;
       default:
@@ -464,8 +578,9 @@ namespace leansdr {
       }
     }
     struct result {
-      struct softsymbol ss;
+      SOFTSYMB ss;
       s_angle phase_error;
+      uint8_t symbol;  // Nearest symbol, useful for C&T recovery
     };
     inline result *lookup(float I, float Q) {
       // Handling of overflows beyond the lookup table:
@@ -523,74 +638,96 @@ namespace leansdr {
 	  symbols[s].im = Q * scale * cstln_amp;
 	  ++s;
 	}
-      make_lut_from_symbols();
+      make_lut_from_symbols(20);  // TBD
     }
     result lut[R][R];
-    void make_lut_from_symbols() {
+    void make_lut_from_symbols(float mer) {
+      // Note: Excessively low values of MER will break 16APSK and 32APSK.
+      float sigma = cstln_amp * exp10f(-mer/20);
+
+      // Precomputed values.
+      // Shared scope so that we don't have to reset dists2[nsymbols..] to -1.
+      struct full_ss fss;
+      for ( int s=0; s<256; ++s ) fss.dists2[s] = -1;
+
       for ( int I=-R/2; I<R/2; ++I )
 	for ( int Q=-R/2; Q<R/2; ++Q ) {
-	  result *pr = &lut[I&(R-1)][Q&(R-1)];
-	  // Simplified metric:
-	  // Distance to nearest minus distance to second-nearest.
-	  // Null at edge of decision regions
-	  // => Suitable for Viterbi with partial metrics.
-	  uint8_t nearest = 0;
-	  int32_t cost=R*R*2, cost2=R*R*2;
+	  // Nearest symbol
+	  fss.nearest = 0;
+	  fss.dists2[0] = 65535;
+	  // Conditional probabilities:
+	  // Sum likelyhoods from all candidate symbols.
+	  //
+	  // P(TX[b]==B | RX==IQ) =
+	  //   sum(S=0..nsymbols-1, P(TX[b]==B | RX==IQ && TXs==S))
+	  //
+	  // P(TX[b] == B | RX==IQ && TX==S) =
+	  //   P(TX[b]==B && RX==IQ && TX==S) / P(RX==IQ && TX==S)
+	  float probs[8][2];
+	  memset(probs, 0, sizeof(probs));
 	  for ( int s=0; s<nsymbols; ++s ) {
-	    int32_t d2 =
-	      (I-symbols[s].re)*(I-symbols[s].re) +
-	      (Q-symbols[s].im)*(Q-symbols[s].im);
-	    if ( d2 < cost ) {
-	      cost2 = cost;
-	      cost = d2;
-	      nearest = s;
-	    } else if ( d2 < cost2 ) {
-	      cost2 = d2;
+	    float d2 = ( (I-symbols[s].re)*(I-symbols[s].re) +
+			 (Q-symbols[s].im)*(Q-symbols[s].im) );
+	    if ( d2 < fss.dists2[fss.nearest] ) fss.nearest = s;
+	    fss.dists2[s] = d2;
+	    float p = expf(-d2/(2*sigma*sigma)) / (sqrtf(2*M_PI)*sigma);
+	    for ( int bit=0; bit<8; ++bit ) {
+	      probs[bit][(s>>bit)&1] += p;
 	    }
 	  }
-	  if ( cost > 32767 ) cost = 32767;
-	  if ( cost2 > 32767 ) cost2 = 32767;
-	  pr->ss.cost = cost - cost2;
-	  pr->ss.symbol = nearest;
-	  float ph_symbol = atan2f(symbols[pr->ss.symbol].im,
-				   symbols[pr->ss.symbol].re);
+	  // Normalize
+	  for ( int b=0; b<8; ++b ) {
+	    float p = probs[b][1] / (probs[b][0]+probs[b][1]);
+	    // Avoid trouble when sigma is unrealistically low.
+	    if ( ! isnormal(p) ) p = 0;
+	    fss.p[b] = p;
+	  }
+	  result *pr = &lut[I&(R-1)][Q&(R-1)];
+	  to_softsymb(&fss, &pr->ss);
+	  // Always record nearest symbol and phase error for C&T.
+	  pr->symbol = fss.nearest;
+	  float ph_symbol = atan2f(symbols[pr->symbol].im,
+				   symbols[pr->symbol].re);
 	  float ph_err = atan2f(Q,I) - ph_symbol;
-	  pr->phase_error = (s32)(ph_err * 65536 / (2*M_PI));  // Mod 65536
+	  pr->phase_error = (int32_t)(ph_err * 65536 / (2*M_PI));  // Mod 65536
 	}
     }
 
   public:
+    void dump(FILE *f) {
+      int bps = log2(nsymbols);
+      fprintf(f, "P5\n%d %d\n255\n", R, R*(bps+1));
+      for ( int bit=0; bit<bps+1; ++bit ) {
+	for ( int Q=R/2-1; Q>=-R/2; --Q )
+	  for ( int I=-R/2; I<R/2; ++I ) {
+	    result *pr = &lut[I&(R-1)][Q&(R-1)];
+	    uint8_t v;
+	    if ( bit < bps) v = softsymb_to_dump(pr->ss, bit);
+	    else            v = 128 + pr->phase_error/64;
+	    // Highlight the constellation symbols.
+	    for ( int s=0; s<nsymbols; ++s ) {
+	      if ( symbols[s].re==I && symbols[s].im==Q ) v ^= 128;
+	    }
+	    fputc(v, f);
+	  }
+      }
+    }
     // Convert soft metric to Hamming distance
     void harden() {
       for ( int i=0; i<R; ++i )
-	for ( int q=0; q<R; ++q ) {
-         softsymbol *ss = &lut[i][q].ss;
-	 if ( ss->cost < 0 ) ss->cost = -1;
-	 if ( ss->cost > 0 ) ss->cost = 1;
-       }  // for I,Q
-     }
+	for ( int q=0; q<R; ++q )
+	  softsymb_harden(&lut[i][q].ss);
+    }
 
   };  // cstln_lut
-
-  static const char *cstln_names[] = {
-    [cstln_lut<256>::BPSK]    = "BPSK",
-    [cstln_lut<256>::QPSK]    = "QPSK",
-    [cstln_lut<256>::PSK8]    = "8PSK",
-    [cstln_lut<256>::APSK16]  = "16APSK",
-    [cstln_lut<256>::APSK32]  = "32APSK",
-    [cstln_lut<256>::APSK64E] = "64APSKe",
-    [cstln_lut<256>::QAM16]   = "16QAM",
-    [cstln_lut<256>::QAM64]   = "64QAM",
-    [cstln_lut<256>::QAM256]  = "256QAM"
-  };
 
   // SAMPLER INTERFACE FOR CSTLN_RECEIVER
   
   template<typename T>
   struct sampler_interface {
     virtual complex<T> interp(const complex<T> *pin, float mu, float phase) = 0;
-    virtual void update_freq(float freqw) { }  // 65536 = 1 Hz
-    virtual int readahead() { return 0; }
+    virtual void update_freq(float freqw, int period=1) { }  // 65536 = 1 Hz
+    virtual int readahead() = 0;
   };
 
 
@@ -622,7 +759,7 @@ namespace leansdr {
       return s0*(1-mu) + s1*mu;
     }
 
-    void update_freq(float _freqw) { freqw = _freqw; }
+    void update_freq(float _freqw, int period=1) { freqw = _freqw; }
 
   private:
     trig16 trig;
@@ -639,6 +776,7 @@ namespace leansdr {
 	shifted_coeffs(new complex<T>[ncoeffs]),
 	update_freq_phase(0)
     {
+      do_update_freq(0);  // In case application never calls update_freq()
     }
 
     int readahead() { return ncoeffs-1; }
@@ -664,10 +802,10 @@ namespace leansdr {
       return trig.expi(-phase) * acc;
     }
 
-    void update_freq(float freqw) {
+    void update_freq(float freqw, int period) {
       // Throttling: Update one coeff per 16 processed samples,
       // to keep the overhead of freq tracking below about 10%.
-      update_freq_phase -= 128;  // chunk_size of cstln_receiver
+      update_freq_phase -= period;
       if ( update_freq_phase <= 0  ) {
 	update_freq_phase = ncoeffs*16;
 	do_update_freq(freqw);
@@ -694,10 +832,10 @@ namespace leansdr {
   // Linear interpolation: good enough for 1.2 samples/symbol,
   // but higher oversampling is recommended.
 
-  template<typename T>
+  template<typename T, typename SOFTSYMB>
   struct cstln_receiver : runnable {
     sampler_interface<T> *sampler;
-    cstln_lut<256> *cstln;
+    cstln_lut<SOFTSYMB,256> *cstln;
     unsigned long meas_decimation;      // Measurement rate
     float omega, min_omega, max_omega;  // Samples per symbol
     float freqw, min_freqw, max_freqw;  // Freq offs (65536 = 1 Hz)
@@ -709,7 +847,7 @@ namespace leansdr {
     cstln_receiver(scheduler *sch,
 		   sampler_interface<T> *_sampler,
 		   pipebuf< complex<T> > &_in,
-		   pipebuf<softsymbol> &_out,
+		   pipebuf<SOFTSYMB> &_out,
 		   pipebuf<float> *_freq_out=NULL,
 		   pipebuf<float> *_ss_out=NULL,
 		   pipebuf<float> *_mer_out=NULL,
@@ -787,10 +925,10 @@ namespace leansdr {
 	      ( !mer_out   || mer_out  ->writable()>=max_meas ) &&
 	      ( !cstln_out || cstln_out->writable()>=max_meas ) ) {
 
-	sampler->update_freq(freqw);
+	sampler->update_freq(freqw, chunk_size);
 
 	complex<T> *pin=in.rd(), *pin0=pin, *pend=pin+chunk_size;
-	softsymbol *pout=out.wr(), *pout0=pout;
+	SOFTSYMB *pout=out.wr(), *pout0=pout;
 	
 	// These are scoped outside the loop for SS and MER estimation.
 	complex<float> sg; // Symbol before AGC;
@@ -802,11 +940,12 @@ namespace leansdr {
 	  if ( mu < 1 ) {
 	    // Here 0<=mu<1 is the fractional time of the next symbol
 	    // between pin and pin+1.
-	    sg = sampler->interp(pin, mu, phase);
+	    sg = sampler->interp(pin, mu, phase+mu*freqw);
 	    s = sg * agc_gain;
 	    
 	    // Constellation look-up
-	    cstln_lut<256>::result *cr = cstln->lookup(s.re, s.im);
+	    typename cstln_lut<SOFTSYMB,256>::result *cr =
+	      cstln->lookup(s.re, s.im);
 	    *pout = cr->ss;
 	    ++pout;
 	    
@@ -823,7 +962,7 @@ namespace leansdr {
 	    hist[1] = hist[0];
 	    hist[0].p.re = s.re;
 	    hist[0].p.im = s.im;
-	    cstln_point = &cstln->symbols[cr->ss.symbol];
+	    cstln_point = &cstln->symbols[cr->symbol];
 	    hist[0].c.re = cstln_point->re;
 	    hist[0].c.im = cstln_point->im;
 	    float muerr =
@@ -852,7 +991,7 @@ namespace leansdr {
 	// Normalize phase so that it never exceeds 32 bits.
 	// Max freqw is 2^31/65536/chunk_size = 256 Hz
 	// (this may happen with leandvb --drift --decim).
-	phase = fmodf(phase, 65536);
+	phase = fmodf(phase, 65536);  // Rounding direction irrelevant
 
 	if ( cstln_point ) {
 	  
@@ -925,7 +1064,7 @@ namespace leansdr {
       complex<float> c;  // Matched constellation point
     } hist[3];
     pipereader< complex<T> > in;
-    pipewriter<softsymbol> out;
+    pipewriter<SOFTSYMB> out;
     float est_insp, agc_gain;
     float mu;  // PSK time expressed in clock ticks
     float phase;  // 65536=2pi
@@ -1195,7 +1334,7 @@ namespace leansdr {
 
   template<typename Tout, int Zout>
   struct cstln_transmitter : runnable {
-    cstln_lut<256> *cstln;
+    cstln_lut<hard_ss,256> *cstln;
     cstln_transmitter(scheduler *sch,
 		      pipebuf<u8> &_in, pipebuf< complex<Tout> > &_out)
       : runnable(sch, "cstln_transmitter"),
@@ -1344,28 +1483,29 @@ namespace leansdr {
     int phase;
   };  // cnr_fft
 
-  template<typename T>
+  template<typename T, int NFFT>
   struct spectrum : runnable {
-    static const int nfft = 1024;
     spectrum(scheduler *sch, pipebuf< complex<T> > &_in,
-	     pipebuf<float[nfft]> &_out)
+	     pipebuf<float[NFFT]> &_out)
       : runnable(sch, "spectrum"),
 	decimation(1048576), kavg(0.1),
+	decim(1),
 	in(_in), out(_out),
-	fft(nfft), avgpower(NULL), phase(0) {
+	fft(NFFT), avgpower(NULL), phase(0) {
     }
 
     int decimation;
     float kavg;
+    int decim;
 
     void run() {
-      while ( in.readable()>=fft.n && out.writable()>=1 ) {
-	phase += fft.n;
+      while ( in.readable()>=fft.n*decim && out.writable()>=1 ) {
+	phase += fft.n*decim;
 	if ( phase >= decimation ) {
 	  phase -= decimation;
 	  do_spectrum();
 	}
-	in.read(fft.n);
+	in.read(fft.n*decim);
       }
     }
 
@@ -1373,9 +1513,14 @@ namespace leansdr {
 
     void do_spectrum() {
       complex<T> data[fft.n];
-      memcpy(data, in.rd(), fft.n*sizeof(data[0]));
+      if ( decim == 1 ) {
+	memcpy(data, in.rd(), fft.n*sizeof(data[0]));
+      } else {
+	complex<T> *pin = in.rd();
+	for ( int i=0; i<fft.n; ++i,pin+=decim ) data[i] = *pin;
+      }
       fft.inplace(data, true);
-      float power[nfft];
+      float power[NFFT];
       for ( int i=0; i<fft.n; ++i )
 	power[i] = (float)data[i].re*data[i].re + (float)data[i].im*data[i].im;
       if ( ! avgpower ) {
@@ -1389,15 +1534,15 @@ namespace leansdr {
 
       // Reuse power[]
       for ( int i=0; i<fft.n/2; ++i ) {
-	power[i] = 10 * log10f(avgpower[nfft/2+i]);
-	power[nfft/2+i] = 10 * log10f(avgpower[i]);
+	power[i] = 10 * log10f(avgpower[NFFT/2+i]);
+	power[NFFT/2+i] = 10 * log10f(avgpower[i]);
       }
-      memcpy(out.wr(), power, sizeof(power[0])*nfft);
+      memcpy(out.wr(), power, sizeof(power[0])*NFFT);
       out.written(1);
     }
 
     pipereader< complex<T> > in;
-    pipewriter< float[nfft] > out;
+    pipewriter< float[NFFT] > out;
     cfft_engine<T> fft;
     T *avgpower;
     int phase;

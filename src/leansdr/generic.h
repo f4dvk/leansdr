@@ -49,12 +49,14 @@ struct file_reader : runnable {
 
   again:
     ssize_t nr = read(fdin, out.wr(), size);
-    if ( nr<0 && errno==EWOULDBLOCK && filler ) {
-      if ( sch->debug ) fprintf(stderr, "U");
-      out.write(*filler);
+    if ( nr<0 && errno==EWOULDBLOCK ) {
+      if ( filler ) {
+	if ( sch->debug ) fprintf(stderr, "U");
+	out.write(*filler);
+      }
       return;
     }
-    if ( nr < 0 ) fatal("read");
+    if ( nr < 0 ) fatal("read(file_reader)");
     if ( ! nr ) {
       if ( ! loop ) return;
       if ( sch->debug ) fprintf(stderr, "%s looping\n", name);
@@ -195,17 +197,17 @@ struct file_vectorprinter : runnable {
 		     const char *_format,
 		     const char *_sep,
 		     const char *_tail,
-		     pipebuf<T[N]> &_in, int _fdout) :
+		     pipebuf<T[N]> &_in, int _fdout, int _n=N) :
     runnable(sch, _in.name), scale(1), in(_in),
-    head(_head), format(_format), sep(_sep), tail(_tail) {
+    head(_head), format(_format), sep(_sep), tail(_tail), n(_n) {
     fout = fdopen(_fdout,"w");
     if ( ! fout ) fatal("fdopen");
   }
   void run() {
     while ( in.readable() >= 1 ) {
-      fprintf(fout, head, N);
+      fprintf(fout, head, n);
       T (*pin)[N] = in.rd();
-      for ( int i=0; i<N; ++i ) {
+      for ( int i=0; i<n; ++i ) {
 	if ( i ) fprintf(fout, "%s", sep);
 	fprintf(fout, format, (*pin)[i]*scale);
       }
@@ -219,6 +221,7 @@ private:
   pipereader<T[N]> in;
   const char *head, *format, *sep, *tail;
   FILE *fout;
+  int n;
 };
 
 // [itemcounter] writes the number of input items to the output [pipebuf].
