@@ -22,7 +22,7 @@
 
 namespace leansdr {
   namespace filtergen {
-  
+
     template<typename T>
     void normalize_power(int n, T *coeffs, float gain=1) {
       float s2 = 0;
@@ -56,7 +56,7 @@ namespace leansdr {
       for ( int i=0; i<ncoeffs; ++i ) {
 	float t = i - (ncoeffs-1)*0.5;
 	float sinc = 2*Fcut * (t ? sin(2*M_PI*Fcut*t)/(2*M_PI*Fcut*t) : 1);
-#if 0  // Hamming 
+#if 0  // Hamming
 	float alpha = 25.0/46, beta = 21.0/46;
 	float window = alpha - beta*cos(2*M_PI*i/order);
 #else
@@ -68,12 +68,13 @@ namespace leansdr {
       return ncoeffs;
     }
 
-    
+
     // Generate coefficients for a RRC filter.
     // https://en.wikipedia.org/wiki/Root-raised-cosine_filter
 
     template<typename T>
-    int root_raised_cosine(int order, float Fs, float rolloff, T **coeffs) {
+    int root_raised_cosine(int order, float Fs, float rolloff, T **coeffs,
+			   float gain=1) {
       float B = rolloff, pi = M_PI;
       int ncoeffs = (order+1) | 1;
       *coeffs = new T[ncoeffs];
@@ -81,20 +82,18 @@ namespace leansdr {
 	int t = i - ncoeffs/2;
 	float c;
 	if ( t == 0 )
-	  c = sqrt(Fs) * (1-B+4*B/pi);
+	  c =(1-B+4*B/pi);
 	else {
 	  float tT = t * Fs;
 	  float den = pi*tT*(1-(4*B*tT)*(4*B*tT));
 	  if ( ! den )
-	    c = B*sqrt(Fs/2) * ( (1+2/pi)*sin(pi/(4*B)) +
-				 (1-2/pi)*cos(pi/(4*B)) );
+	    c = B/sqrtf(2) * ( (1+2/pi)*sinf(pi/(4*B)) +
+			       (1-2/pi)*cosf(pi/(4*B)) );
 	  else
-	    c = sqrt(Fs) * ( sin(pi*tT*(1-B)) +
-			     4*B*tT*cos(pi*tT*(1+B)) ) / den;
+	    c = ( sinf(pi*tT*(1-B)) + 4*B*tT*cosf(pi*tT*(1+B)) ) / den;
 	}
-	(*coeffs)[i] = c;
+	(*coeffs)[i] = Fs * c * gain;
       }
-      normalize_dcgain(ncoeffs, *coeffs);
       return ncoeffs;
     }
 

@@ -37,7 +37,7 @@ namespace leansdr {
   //////////////////////////////////////////////////////////////////////
   // SDR blocks
   //////////////////////////////////////////////////////////////////////
-  
+
   // AUTO-NOTCH FILTER
 
   // Periodically detects the [nslots] strongest peaks with a FFT,
@@ -98,7 +98,7 @@ namespace leansdr {
 	for ( int i=0; i<fft.n; ++i )
 	  if ( amp[i] > amp[iamax] ) iamax=i;
 	if ( iamax != s->i ) {
-	  if ( sch->debug ) 
+	  if ( sch->debug )
 	    fprintf(stderr, "%s: slot %d new peak %d -> %d\n",
 		    name, (int)(s-slots), s->i, iamax);
 	  s->i = iamax;
@@ -136,7 +136,7 @@ namespace leansdr {
 	pout->im = gain * out.im;
       }
     }
-    
+
   private:
     cfft_engine<float> fft;
     pipereader< complex<T> > in;
@@ -182,7 +182,7 @@ namespace leansdr {
 	in.read(window_size);
       }
     }
-  private:  
+  private:
     pipereader< complex<T> > in;
     pipewriter<T> out;
     unsigned long phase;
@@ -226,12 +226,12 @@ namespace leansdr {
 	in.read(window_size);
       }
     }
-  private:  
+  private:
     pipereader< complex<T> > in;
     pipewriter<T> out_ss, out_ampmin, out_ampmax;
     unsigned long phase;
   };
-  
+
   // AGC
 
   template<typename T>
@@ -283,7 +283,7 @@ namespace leansdr {
   // Metrics and phase errors are pre-computed on a RxR grid.
   // R must be a power of 2.
   // Up to 256 symbols.
-  
+
   struct softsymbol {  // TBD obsolete
     int16_t cost;  // For Viterbi with TBM=int16_t
     uint8_t symbol;
@@ -550,7 +550,7 @@ namespace leansdr {
 	polar2(20, r4, 11.0/28, 45.0/28, 17.0/28, 39.0/28);
 	polar2(24, r3,  1.0/20, 39.0/20, 19.0/20, 21.0/20);
 	polar2(28, r2,  1.0/12, 23.0/12, 11.0/12, 13.0/12);
-	polar2(32, r4,  5.0/28, 51.0/28, 23.0/28, 33.0/28); 
+	polar2(32, r4,  5.0/28, 51.0/28, 23.0/28, 33.0/28);
 	polar2(36, r3,  9.0/20, 31.0/20, 11.0/20, 29.0/20);
 	polar2(40, r4,  3.0/28, 53.0/28, 25.0/28, 31.0/28);
 	polar2(44, r2,  5.0/12, 19.0/12,  7.0/12, 17.0/12);
@@ -563,15 +563,15 @@ namespace leansdr {
       }
       case QAM16:
 	amp_max = 0;
-	make_qam(16);
+	make_qam(16, mer);
 	break;
       case QAM64:
 	amp_max = 1;
-	make_qam(64);
+	make_qam(64, mer);
 	break;
       case QAM256:
 	amp_max = 1;
-	make_qam(256);
+	make_qam(256, mer);
 	break;
       default:
 	fail("Constellation not implemented");
@@ -617,7 +617,7 @@ namespace leansdr {
 					    r*sinf(phi)*cstln_amp);
       }
     }
-    void make_qam(int n) {
+    void make_qam(int n, float mer) {
       nrotations = 4;
       nsymbols = n;
       symbols = new complex<signed char>[nsymbols];
@@ -638,7 +638,7 @@ namespace leansdr {
 	  symbols[s].im = Q * scale * cstln_amp;
 	  ++s;
 	}
-      make_lut_from_symbols(20);  // TBD
+      make_lut_from_symbols(mer);
     }
     result lut[R][R];
     void make_lut_from_symbols(float mer) {
@@ -722,11 +722,11 @@ namespace leansdr {
   };  // cstln_lut
 
   // SAMPLER INTERFACE FOR CSTLN_RECEIVER
-  
+
   template<typename T>
   struct sampler_interface {
     virtual complex<T> interp(const complex<T> *pin, float mu, float phase) = 0;
-    virtual void update_freq(float freqw, int period=1) { }  // 65536 = 1 Hz
+    virtual void update_freq(float freqw, int weight=0) { }  // 65536 = 1 Hz
     virtual int readahead() = 0;
   };
 
@@ -759,7 +759,7 @@ namespace leansdr {
       return s0*(1-mu) + s1*mu;
     }
 
-    void update_freq(float _freqw, int period=1) { freqw = _freqw; }
+    void update_freq(float _freqw, int weight=0) { freqw = _freqw; }
 
   private:
     trig16 trig;
@@ -795,17 +795,18 @@ namespace leansdr {
       } else {
 	// Not vectorized because the coefficients are not
 	// guaranteed to be contiguous in memory.
-	for ( ; pc<pcend; pc+=subsampling,++pin ) 
+	for ( ; pc<pcend; pc+=subsampling,++pin )
 	  acc += (*pc)*(*pin);
       }
       // Derotate
       return trig.expi(-phase) * acc;
     }
 
-    void update_freq(float freqw, int period) {
+    void update_freq(float freqw, int weight=0) {
+      if ( ! weight ) update_freq_phase = 0;  // Force refresh.
       // Throttling: Update one coeff per 16 processed samples,
       // to keep the overhead of freq tracking below about 10%.
-      update_freq_phase -= period;
+      update_freq_phase -= weight;
       if ( update_freq_phase <= 0  ) {
 	update_freq_phase = ncoeffs*16;
 	do_update_freq(freqw);
@@ -843,7 +844,7 @@ namespace leansdr {
     bool allow_drift;                   // Follow carrier beyond safe limits
     static const unsigned int chunk_size = 128;
     float kest;
-    
+
     cstln_receiver(scheduler *sch,
 		   sampler_interface<T> *_sampler,
 		   pipebuf< complex<T> > &_in,
@@ -872,14 +873,14 @@ namespace leansdr {
       cstln_out = _cstln_out ? new pipewriter<cf32>(*_cstln_out) : NULL;
       memset(hist, 0, sizeof(hist));
     }
-    
+
     void set_omega(float _omega, float tol=10e-6) {
       omega = _omega;
       min_omega = omega * (1-tol);
       max_omega = omega * (1+tol);
       update_freq_limits();
     }
-    
+
     void set_freq(float freq) {
       freqw = freq * 65536;
       update_freq_limits();
@@ -906,10 +907,10 @@ namespace leansdr {
       min_freqw = freqw - 65536/max_omega/n/2;
       max_freqw = freqw + 65536/max_omega/n/2;
     }
-    
+
     void run() {
       if ( ! cstln ) fail("constellation not set");
-      
+
       // Magic constants that work with the qa recordings.
       float freq_alpha = 0.04;
       float freq_beta = 0.0012 / omega * pll_adjustment;
@@ -929,7 +930,7 @@ namespace leansdr {
 
 	complex<T> *pin=in.rd(), *pin0=pin, *pend=pin+chunk_size;
 	SOFTSYMB *pout=out.wr(), *pout0=pout;
-	
+
 	// These are scoped outside the loop for SS and MER estimation.
 	complex<float> sg; // Symbol before AGC;
 	complex<float> s;  // For MER estimation and constellation viewer
@@ -942,17 +943,17 @@ namespace leansdr {
 	    // between pin and pin+1.
 	    sg = sampler->interp(pin, mu, phase+mu*freqw);
 	    s = sg * agc_gain;
-	    
+
 	    // Constellation look-up
 	    typename cstln_lut<SOFTSYMB,256>::result *cr =
 	      cstln->lookup(s.re, s.im);
 	    *pout = cr->ss;
 	    ++pout;
-	    
+
 	    // PLL
 	    phase += cr->phase_error * freq_alpha;
 	    freqw += cr->phase_error * freq_beta;
-	    
+
 	    // Modified Mueller and Müller
 	    // mu[k]=real((c[k]-c[k-2])*conj(p[k-1])-(p[k]-p[k-2])*conj(c[k-1]))
 	    //      =dot(c[k]-c[k-2],p[k-1]) - dot(p[k]-p[k-2],c[k-1])
@@ -978,13 +979,13 @@ namespace leansdr {
 	    mu += mucorr;
 	    mu += omega;  // Next symbol time;
 	  } // mu<1
-	  
+
 	  // Next sample
 	  ++pin;
 	  --mu;
 	  phase += freqw;
 	}  // chunk_size
-	
+
 	in.read(pin-pin0);
 	out.written(pout-pout0);
 
@@ -994,11 +995,11 @@ namespace leansdr {
 	phase = fmodf(phase, 65536);  // Rounding direction irrelevant
 
 	if ( cstln_point ) {
-	  
+
 	  // Output the last interpolated PSK symbol, max once per chunk_size
 	  if ( cstln_out )
 	    cstln_out->write(s);
-	
+
 	  // AGC
 	  // For APSK we must do AGC on the symbols, not the whole signal.
 	  // TODO Use a better estimator at low SNR.
@@ -1006,7 +1007,7 @@ namespace leansdr {
 	  est_insp = insp*kest + est_insp*(1-kest);
 	  if ( est_insp )
 	    agc_gain = cstln_amp / gen_sqrt(est_insp);
-	  
+
 	  // SS and MER
 	  complex<float> ev(s.re-cstln_point->re, s.im-cstln_point->im);
 	  float sig_power, ev_power;
@@ -1030,14 +1031,14 @@ namespace leansdr {
 
 	// This is best done periodically ouside the inner loop,
 	// but will cause non-deterministic output.
-	
+
 	if ( ! allow_drift ) {
 	  if ( freqw < min_freqw || freqw > max_freqw )
 	    freqw = (max_freqw+min_freqw) / 2;
 	}
-      
+
 	// Output measurements
-	
+
 	refresh_freq_tap();
 
 	meas_count += pin-pin0;
@@ -1050,10 +1051,10 @@ namespace leansdr {
 	  if ( mer_out )
 	    mer_out->write(est_ep ? 10*logf(est_sp/est_ep)/logf(10) : 0);
 	}
-	
+
       }  // Work to do
     }
-    
+
     float freq_tap;
     void refresh_freq_tap() {
       freq_tap = freqw / 65536;
@@ -1075,8 +1076,8 @@ namespace leansdr {
     pipewriter<float> *freq_out, *ss_out, *mer_out;
     pipewriter<cf32> *cstln_out;
   };
- 
-  
+
+
   // FAST QPSK RECEIVER
 
   // Optimized for u8 input, no AGC, uses phase information only.
@@ -1091,7 +1092,7 @@ namespace leansdr {
     float pll_adjustment;
     bool allow_drift;                   // Follow carrier beyond safe limits
     static const unsigned int chunk_size = 128;
-    
+
     fast_qpsk_receiver(scheduler *sch,
 		       pipebuf< complex<T> > &_in,
 		       pipebuf<hardsymbol> &_out,
@@ -1112,14 +1113,14 @@ namespace leansdr {
       memset(hist, 0, sizeof(hist));
       init_lookup_tables();
     }
-    
+
     void set_omega(float _omega, float tol=10e-6) {
       omega = _omega;
       min_omega = omega * (1-tol);
       max_omega = omega * (1+tol);
       update_freq_limits();
     }
-    
+
     void set_freq(float freq) {
       freqw = freq * 65536;
       update_freq_limits();
@@ -1150,7 +1151,7 @@ namespace leansdr {
 	      out.writable() >= chunk_size &&
 	      ( !freq_out  || freq_out ->writable()>=max_meas ) &&
 	      ( !cstln_out || cstln_out->writable()>=max_meas ) ) {
-	
+
 	complex<T> *pin=in.rd(), *pin0=pin, *pend=pin+chunk_size;
 	hardsymbol *pout=out.wr(), *pout0=pout;
 
@@ -1206,7 +1207,7 @@ namespace leansdr {
 	    s_angle phase_error = (s_angle)(symbol_arg&16383) - 8192;
 	    phase += (phase_error * freq_alpha + 32768) >> 16;
 	    freqw += (phase_error * freq_beta + 32768*256) >> 24;
-	    
+
 	    // Modified Mueller and Müller
 	    // mu[k]=real((c[k]-c[k-2])*conj(p[k-1])-(p[k]-p[k-2])*conj(c[k-1]))
 	    //      =dot(c[k]-c[k-2],p[k-1]) - dot(p[k]-p[k-2],c[k-1])
@@ -1246,40 +1247,40 @@ namespace leansdr {
 	    mu += mucorr;
 	    mu += omega;  // Next symbol time;
 	  } // mu<1
-	  
+
 	  // Next sample
 	  ++pin;
 	  --mu;
 	  phase += freqw;
 	}  // chunk_size
-	
+
 	in.read(pin-pin0);
 	out.written(pout-pout0);
 
 	if ( symbol_arg && cstln_out )
 	  // Output the last interpolated PSK symbol, max once per chunk_size
 	  cstln_out->write(s);
-	
+
 	// This is best done periodically ouside the inner loop,
 	// but will cause non-deterministic output.
-	
+
 	if ( ! allow_drift ) {
 	  if ( freqw < min_freqw || freqw > max_freqw )
 	    freqw = (max_freqw+min_freqw) / 2;
 	}
-      
+
 	// Output measurements
-	
+
 	meas_count += pin-pin0;
 	while ( meas_count >= meas_decimation ) {
 	  meas_count -= meas_decimation;
 	  if ( freq_out )
 	    freq_out->write((float)freqw / 65536);
 	}
-	
+
       }  // Work to do
   }
-    
+
   private:
 
     struct polar { u_angle a; unsigned char r; } lut_polar[256][256];
@@ -1326,7 +1327,7 @@ namespace leansdr {
     pipewriter<float> *freq_out, *mer_out;
     pipewriter<cu8> *cstln_out;
   };  // fast_qpsk_receiver
-  
+
 
   // CONSTELLATION TRANSMITTER
 
@@ -1363,7 +1364,7 @@ namespace leansdr {
   // FREQUENCY SHIFTER
 
   // Resolution is sample_freq/65536.
-  
+
   template<typename T>
   struct rotator : runnable {
     rotator(scheduler *sch, pipebuf< complex<T> > &_in,
@@ -1423,7 +1424,7 @@ namespace leansdr {
     }
 
     float bandwidth;
-    float *freq_tap, tap_multiplier;    
+    float *freq_tap, tap_multiplier;
     int decimation;
     float kavg;
 
@@ -1437,7 +1438,7 @@ namespace leansdr {
 	in.read(fft.n);
       }
     }
-    
+
   private:
 
     void do_cnr() {
@@ -1457,7 +1458,7 @@ namespace leansdr {
       // Accumulate and low-pass filter
       for ( int i=0; i<fft.n; ++i )
 	avgpower[i] = avgpower[i]*(1-kavg) + power[i]*kavg;
-      
+
       int bwslots = (bandwidth/4) * fft.n;
       if ( ! bwslots ) return;
       // Measure carrier+noise in center band
@@ -1475,7 +1476,7 @@ namespace leansdr {
       for ( int i=i0; i<=i1; ++i ) s += avgpower[i&(fft.n-1)];
       return s / (i1-i0+1);
     }
-    
+
     pipereader< complex<T> > in;
     pipewriter< float > out;
     cfft_engine<T> fft;
