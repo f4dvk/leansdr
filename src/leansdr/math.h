@@ -30,6 +30,7 @@ namespace leansdr {
     complex(T x) : re(x), im(0) { }
     complex(T x, T y) : re(x), im(y) { }
     inline void operator +=(const complex<T> &x) { re+=x.re; im+=x.im; }
+    inline void operator -=(const complex<T> &x) { re-=x.re; im-=x.im; }
     inline void operator *=(const complex<T> &c) {
       T tre = re*c.re - im*c.im;
       im = re*c.im + im*c.re;
@@ -41,6 +42,11 @@ namespace leansdr {
   template<typename T>
   complex<T> operator +(const complex<T> &a, const complex<T> &b) {
     return complex<T>(a.re+b.re, a.im+b.im);
+  }
+
+  template<typename T>
+  complex<T> operator -(const complex<T> &a, const complex<T> &b) {
+    return complex<T>(a.re-b.re, a.im-b.im);
   }
 
   template<typename T>
@@ -149,6 +155,38 @@ namespace leansdr {
       return expi((uint16_t)(int16_t)(int32_t)a);
     }
   };
+
+  // Modulo with signed result in [-m/2..m/2[
+
+  inline float fmodfs(float v, float m) {
+    v = fmodf(v, m);
+    return (v>=m/2) ? v-m : (v<-m/2) ? v+m : v;
+  }
+
+  // Simple statistics
+
+  template<typename T>
+  struct statistics {
+    statistics() { reset(); }
+    void reset() { vm1=vm2=0; count=0; vmin=vmax=99;/*comp warning*/ }
+    void add(const T &v) {
+      vm1 += v;
+      vm2 += v*v;
+      if ( count == 0 ) vmin = vmax = v;
+      else if ( v < vmin ) vmin = v;
+      else if ( v > vmax ) vmax = v;
+      ++count;
+    }
+    T average() { return vm1 / count; }
+    T variance() { return vm2/count - (vm1/count)*(vm1/count); }
+    T stddev() { return gen_sqrt(variance()); }
+    T min() { return vmin; }
+    T max() { return vmax; }
+  private:
+    T vm1, vm2;    // Moments
+    T vmin, vmax;  // Range
+    int count;     // Number of samples in vm1, vm2
+  };  // statistics
 
 }  // namespace
 
