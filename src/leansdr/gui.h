@@ -27,15 +27,15 @@ namespace leansdr {
   //////////////////////////////////////////////////////////////////////
   // GUI blocks
   //////////////////////////////////////////////////////////////////////
-  
+
 #ifdef GUI
-  
+
 #include <X11/X.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
-  
+
   static const int DEFAULT_GUI_DECIMATION = 64;
-  
+
   struct gfx {
     Display *display;
     int screen;
@@ -75,7 +75,7 @@ namespace leansdr {
 			 KeyReleaseMask|
 			 PointerMotionMask);
       xswa.background_pixel = BlackPixel(display, screen);
-      window = XCreateWindow(display, DefaultRootWindow(display), 
+      window = XCreateWindow(display, DefaultRootWindow(display),
 			     100,100, w,h, 10, CopyFromParent,InputOutput,
 			     CopyFromParent, CWEventMask|CWBackPixel,
 			     &xswa);
@@ -150,7 +150,7 @@ namespace leansdr {
     int mx, my;   // Cursor position
     bool mmoved;  // Pointer moved (must be cleared by owner)
   };
-  
+
   template<typename T>
   struct cscope : runnable {
     T xymin, xymax;
@@ -203,9 +203,9 @@ namespace leansdr {
       g.setfg(0, 255, 0);
       g.line(g.w/2,0, g.w/2, g.h);
       g.line(0,g.h/2, g.w,g.h/2);
-    }	
+    }
   };
-  
+
   template<typename T>
   struct wavescope : runnable {
     T ymin, ymax;
@@ -220,7 +220,7 @@ namespace leansdr {
 	phase(0), g(sch, name), x(0)
     {
       g.clear();
-    }	
+    }
     void run() {
       while ( in.readable() >= g.w ) {
 	if ( ! phase ) plot(in.rd(), g.w);
@@ -301,7 +301,7 @@ namespace leansdr {
       unsigned long count = samples_per_pixel;
       for ( channel *c=chans; c<chans+nchans; ++c )
 	if ( ! (c->spec.flags&chanspec::ASYNC) )
-	  count = min(count, c->in->readable());
+	  count = min(count, (unsigned long) c->in->readable());
       for ( int n=count; n--; ) {
 	for ( channel *c=chans; c<chans+nchans; ++c )
 	  if ( ! (c->spec.flags&chanspec::ASYNC) )
@@ -388,7 +388,7 @@ namespace leansdr {
     int x;
     int total_samples;
   };
-  
+
   template<typename T>
   struct spectrumscope : runnable {
     unsigned long size;
@@ -464,7 +464,7 @@ namespace leansdr {
       }
     }
   };
-  
+
   template<typename T>
   struct rfscope : runnable {
     unsigned long size;
