@@ -24,9 +24,10 @@ CXXFLAGS	+= -DLEANSDR_EXTENSIONS
 
 # Base applications have no external dependencies.
 APPS	=
-APPS	+= leandvbtx leandvb
-APPS	+= leansdrscan leansdrserv
-APPS	+= leantsgen leansdrcat leanchansim
+APPS	+= leandvb
+#APPS	+= leandvbtx leandvb
+#APPS	+= leansdrscan leansdrserv
+#APPS	+= leantsgen leansdrcat leanchansim
 
 ifneq "$(wildcard /usr/include/X11/Xlib.h)" ""
 $(OUTDIR)/leandvb:	CXXFLAGS_APP=-DGUI
@@ -36,27 +37,27 @@ $(info libX11 not found. Will not support --gui.)
 endif
 
 # leanmlmrx requires fftw3 and pthread.
-ifneq "$(wildcard /usr/include/fftw3.h)" ""
-ifneq "$(wildcard /usr/include/pthread.h)" ""
-APPS	+= leanmlmrx
-$(OUTDIR)/leanmlmrx:	LDFLAGS_APP=-lfftw3f -lpthread
-else
-$(info libpthread not found. Will not build leanmlmrx.)
-endif
-else
-$(info libfftw3f not found. Will not build leanmlmrx.)
-endif
+#ifneq "$(wildcard /usr/include/fftw3.h)" ""
+#ifneq "$(wildcard /usr/include/pthread.h)" ""
+#APPS	+= leanmlmrx
+#$(OUTDIR)/leanmlmrx:	LDFLAGS_APP=-lfftw3f -lpthread
+#else
+#$(info libpthread not found. Will not build leanmlmrx.)
+#endif
+#else
+#$(info libfftw3f not found. Will not build leanmlmrx.)
+#endif
 
 # leaniio{rx,tx} require libiio.
 # Expected in ./libiio/, including libiio.a.
 # (Assume libiio dependencies are satisfied.)
-ifneq "$(wildcard libiio/iio.h)" ""
-APPS		+= leaniiorx leaniiotx
-$(OUTDIR)/leaniiorx $(OUTDIR)/leaniiotx:	CXXFLAGS_APP=-Ilibiio
-$(OUTDIR)/leaniiorx $(OUTDIR)/leaniiotx:	LDFLAGS_APP=-Llibiio -Llibiio-$(ARCH) -L. -liio -lpthread -lxml2 -lz -llzma
-else
-$(info libiio not found. Will not build leaniio{rx,tx}.)
-endif
+#ifneq "$(wildcard libiio/iio.h)" ""
+#APPS		+= leaniiorx leaniiotx
+#$(OUTDIR)/leaniiorx $(OUTDIR)/leaniiotx:	CXXFLAGS_APP=-Ilibiio
+#$(OUTDIR)/leaniiorx $(OUTDIR)/leaniiotx:	LDFLAGS_APP=-Llibiio -Llibiio-$(ARCH) -L. -liio -lpthread -lxml2 -lz -llzma
+#else
+#$(info libiio not found. Will not build leaniio{rx,tx}.)
+#endif
 
 $(OUTDIR)/%:	%.cc $(DEPS) $(DEPS_APP)
 	g++ $(CXXFLAGS) $(CXXFLAGS_APP) $< $(LDFLAGS) $(LDFLAGS_APP) -o $@
